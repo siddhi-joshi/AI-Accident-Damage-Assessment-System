@@ -15,7 +15,6 @@ import {
   CalendarDays,
   Camera,
   Check,
-  ChevronDown,
   ChevronRight,
   CircleHelp,
   ClipboardList,
@@ -87,43 +86,12 @@ function Shell({ children }) {
             <small>ASSESSMENT STUDIO</small>
           </span>
         </Link>
-        <div className='workspace-switch'>
-          <span className='workspace-icon'>A</span>
-          <span>
-            <b>Assessment workspace</b>
-            <small>Local development</small>
-          </span>
-          <ChevronDown size={15} />
-        </div>
         <div className='nav-label'>WORKSPACE</div>
         <nav aria-label='Main navigation'>
           {link('/', LayoutDashboard, 'Overview')}
           {link('/claims', ClipboardList, 'All claims')}
           {link('/new', Plus, 'New claim')}
         </nav>
-        <div className='sidebar-bottom'>
-          <div className='help-card'>
-            <span className='help-icon'>
-              <ShieldCheck size={19} />
-            </span>
-            <b>Human review matters</b>
-            <p>
-              Every assessment is preliminary until verified by a qualified
-              reviewer.
-            </p>
-            <Link to='/new'>
-              Start a claim <ArrowRight size={14} />
-            </Link>
-          </div>
-          <div className='side-footer'>
-            <span className='avatar'>AS</span>
-            <span>
-              <b>Assessment team</b>
-              <small>Demo workspace</small>
-            </span>
-            <span className='online-dot' />
-          </div>
-        </div>
       </aside>
       {menuOpen && (
         <button
