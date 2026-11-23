@@ -1,13 +1,18 @@
 import io
+import json as json_module
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
+from pydantic import SecretStr
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base, get_db
 from app.main import app
-from app.routers import images
+from app.routers import assessments, images
+from app.services import damage_analyzer
 
 
 def sample_image(size=(320, 240)):
@@ -40,6 +45,26 @@ def test_claim_to_review_workflow(tmp_path, monkeypatch):
 
     app.dependency_overrides[get_db] = override_db
     monkeypatch.setattr(images, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(damage_analyzer.settings, "upload_dir", str(tmp_path / "uploads"))
+    monkeypatch.setattr(damage_analyzer.settings, "gemini_api_key", SecretStr("test-key"))
+
+    def fake_gemini(url, *, headers, json, timeout):
+        assert "test-key" not in url
+        assert headers["x-goog-api-key"] == "test-key"
+        assert "Hyundai i20 2022" in json["contents"][0]["parts"][0]["text"]
+        assert json["contents"][0]["parts"][2]["inlineData"]["mimeType"] == "image/jpeg"
+        assert "visible_damage" in json["generationConfig"]["responseJsonSchema"]["properties"]
+        result = {
+            "overall_summary": "Visible damage near the front bumper.",
+            "visible_damage": [{"image_index": 1, "part": "front bumper", "damage_type": "broken", "severity": "moderate", "description": "The bumper appears displaced."}],
+            "image_quality_notes": ["Front view is usable."],
+            "uncertainties": ["Hidden damage cannot be assessed."],
+            "recommended_next_steps": ["Inspect the bumper in person."],
+            "review_priority": "elevated",
+        }
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": json_module.dumps(result)}]}}]}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(damage_analyzer.httpx, "post", fake_gemini)
     try:
         with TestClient(app) as client:
             created = client.post("/api/claims", json=payload())
@@ -63,10 +88,12 @@ def test_claim_to_review_workflow(tmp_path, monkeypatch):
 
             analysis = client.post(f"/api/claims/{claim_id}/analyze")
             assert analysis.status_code == 200
-            assert analysis.json()["analysis"]["model_status"] == "not_configured"
-            assert analysis.json()["analysis"]["detections"] == []
+            assert analysis.json()["analysis"]["model_status"] == "completed"
+            assert analysis.json()["analysis"]["detections"][0]["part"] == "front bumper"
             assert analysis.json()["estimate"]["available"] is False
-            assert client.get(f"/api/claims/{claim_id}/assessment").json()["findings"]["analysis"]["requires_human_review"] is True
+            saved_assessment = client.get(f"/api/claims/{claim_id}/assessment").json()
+            assert saved_assessment["findings"]["analysis"]["requires_human_review"] is True
+            assert saved_assessment["model_version"] == "gemini-2.5-flash"
 
             empty_review = client.patch(f"/api/claims/{claim_id}/review", json={"reviewer_notes": "   ", "decision": "assessed"})
             assert empty_review.status_code == 422
@@ -79,6 +106,12 @@ def test_claim_to_review_workflow(tmp_path, monkeypatch):
                 assert client.post(f"/api/claims/{claim_id}/images", files={"file": (f"car{i}.png", sample_image(), "image/png")}).status_code == 201
             ninth = client.post(f"/api/claims/{claim_id}/images", files={"file": ("extra.png", sample_image(), "image/png")})
             assert ninth.status_code == 400
+
+            def limit_reached(*args):
+                raise damage_analyzer.AnalysisUnavailable("Gemini rate limit reached", status_code=429)
+
+            monkeypatch.setattr(assessments, "analyze_vehicle_damage", limit_reached)
+            assert client.post(f"/api/claims/{claim_id}/analyze").status_code == 429
     finally:
         app.dependency_overrides.clear()
         engine.dispose()
@@ -92,3 +125,24 @@ def test_invalid_claim():
         bad = payload()
         bad["incident_date"] = "2099-01-01"
         assert client.post("/api/claims", json=bad).status_code == 422
+
+
+def test_gemini_key_is_required(monkeypatch):
+    monkeypatch.setattr(damage_analyzer.settings, "gemini_api_key", None)
+    with pytest.raises(damage_analyzer.AnalysisUnavailable, match="GEMINI_API_KEY"):
+        damage_analyzer.analyze_vehicle_damage(["unused.jpg"])
+
+
+def test_gemini_provider_failure_is_safe(tmp_path, monkeypatch):
+    path = tmp_path / "car.jpg"
+    path.write_bytes(sample_image())
+    monkeypatch.setattr(damage_analyzer.settings, "gemini_api_key", SecretStr("test-key"))
+
+    def rate_limited(url, **kwargs):
+        return httpx.Response(429, json={"error": "provider detail"}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(damage_analyzer.httpx, "post", rate_limited)
+    with pytest.raises(damage_analyzer.AnalysisUnavailable, match="rate limit") as error:
+        damage_analyzer.analyze_vehicle_damage([str(path)])
+    assert error.value.status_code == 429
+    assert "provider detail" not in str(error.value)

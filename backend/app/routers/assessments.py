@@ -9,7 +9,7 @@ from app.database import get_db
 from app.models import AuditEvent, now
 from app.routers.claims import find_claim
 from app.schemas import AssessmentOut, ReviewUpdate
-from app.services.damage_analyzer import analyze_vehicle_damage
+from app.services.damage_analyzer import AnalysisUnavailable, analyze_vehicle_damage
 from app.services.estimate_service import estimate_repair_cost
 
 router = APIRouter(prefix="/api/claims", tags=["assessments"])
@@ -41,7 +41,11 @@ def analyze(claim_id: int, db: Session = Depends(get_db)):
     if not claim.images:
         raise HTTPException(400, "Upload at least one photo before requesting analysis")
     paths = [str(Path(settings.upload_dir) / image.stored_name) for image in claim.images]
-    result = analyze_vehicle_damage(paths)
+    try:
+        vehicle_context = " ".join(str(value) for value in (claim.vehicle_make, claim.vehicle_model, claim.vehicle_year) if value)
+        result = analyze_vehicle_damage(paths, vehicle_context)
+    except AnalysisUnavailable as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
     estimate = estimate_repair_cost()
     assessment = claim.assessment
     assessment.analysis_status = result["model_status"]

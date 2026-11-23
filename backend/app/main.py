@@ -30,4 +30,5 @@ app.include_router(assessments.router)
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "model_status": "not_configured"}
+    configured = bool(settings.gemini_api_key and settings.gemini_api_key.get_secret_value())
+    return {"status": "ok", "model_status": "configured" if configured else "not_configured"}
